@@ -85,6 +85,23 @@ try:
             st.rerun()
         st.sidebar.divider()
 
+        # Add a filter toggle to separate real user traffic from infrastructure/bot traffic
+        view_mode = st.sidebar.radio(
+            "📊 데이터 조회 모드", 
+            ["전체 데이터 보기", "실제 시청자만 보기 (미국/자동화 제외)"]
+        )
+
+        if view_mode == "실제 시청자만 보기 (미국/자동화 제외)":
+            # Exclude known bot agents and US server traffic
+            is_bot = df['user_agent'].str.contains('github|cron|bot|uptime', case=False, na=False)
+            is_us = df['country'] == 'United States'
+            df = df[~(is_bot | is_us)]
+            
+        if df.empty:
+            st.warning("선택하신 필터 조건에 해당하는 데이터가 없습니다.")
+            st.stop()
+        # -----------------------------
+
         # '전체 프로그램'이 아닌 특정 앱을 선택했을 때만 데이터를 필터링합니다.
         if selected_app != "전체 프로그램":
             df = df[df['app_name'] == selected_app]
@@ -94,11 +111,29 @@ try:
             st.stop()
         # -----------------------------
 
+        
+        # --- [기존 상단 지표 출력 부분 교체] ---
+        # Fetch the exact total count directly from the database to bypass the 1000 limit
+        try:
+            count_res = supabase.table('usage_logs').select('*', count='exact').limit(1).execute()
+            total_events_count = count_res.count if count_res.count else len(df)
+        except Exception as e:
+            total_events_count = len(df)
+
         # 상단 지표
+        # Metrics display
         c1, c2, c3 = st.columns(3)
-        c1.metric("총 이벤트", f"{len(df)}건")
+        
+        # If filtered mode is active, show the filtered count. Otherwise, show the true DB total.
+        display_count = len(df) if view_mode == "실제 시청자만 보기 (미국/자동화 제외)" else total_events_count
+        
+        c1.metric("총 이벤트", f"{display_count}건")
         c2.metric("방문 도시 수", f"{df['city'].nunique()}곳")
-        c3.metric("최근 활동", df.iloc[-1]['city'])
+        
+        # Prevent error if dataframe is empty after filtering
+        last_city = df.iloc[-1]['city'] if not df.empty else "N/A"
+        c3.metric("최근 활동", last_city)
+        # -----------------------------
 
         # 메인 시각화 섹션
         col1, col2 = st.columns([1, 1])
