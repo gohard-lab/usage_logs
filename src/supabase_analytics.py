@@ -20,8 +20,8 @@ st.markdown("전 세계 어디서 우리 프로그램을 사용하고 있는지 
 
 @st.cache_data(ttl=30)
 def load_data():
-    # 데이터를 모두 읽어옵니다.
-    response = supabase.table('usage_logs').select("*").execute()
+    # 🚨 [핵심 패치] order() 내림차순 정렬과 limit()을 명시하여 최신 데이터를 우선적으로 확보합니다.
+    response = supabase.table('usage_logs').select("*").order("timestamp", desc=True).limit(100000).execute()
     
     if not response.data:
         return pd.DataFrame() 
@@ -52,6 +52,19 @@ try:
             ["전체 기간", "오늘", "최근 7일", "이번 달"]
         )
 
+        # 🚨 [패치 1] 날짜 필터링을 가하기 전에, 원본 데이터에서 프로그램 고유 목록을 무조건 먼저 추출합니다!
+        # 이렇게 해야 선택한 기간에 데이터가 없더라도 콤보박스에 'pwned_checker_web'이 사라지지 않고 유지됩니다.
+        if 'app_name' in df.columns:
+            # 결측치 처리 및 문자열 공백 제거 전처리
+            clean_series = df['app_name'].fillna('Unknown App').astype(str).str.strip()
+            # 대소문자 구분 없이 순수한 알파벳/한글 순 정렬 (A-Z)
+            unique_apps = sorted(list(set(clean_series.unique())), key=str.lower)
+            app_list = ["전체 프로그램"] + unique_apps
+        else:
+            app_list = ["전체 프로그램"]
+
+
+        # 이후에 날짜 필터링 조건을 유연하게 적용합니다.
         if filter_option == "오늘":
             df = df[df['timestamp'].dt.normalize() == today]
         elif filter_option == "최근 7일":
@@ -59,21 +72,20 @@ try:
             df = df[df['timestamp'] >= seven_days_ago]
         elif filter_option == "이번 달":
             df = df[df['timestamp'].dt.month == today.month]
+
         
+        # 특정 기간에 데이터가 비어있을 때는 사이드바 경고만 띄우고 흐름을 유지합니다.
         if df.empty:
-            st.warning(f"선택하신 '{filter_option}' 기간에는 데이터가 없습니다.")
-            st.stop()
+            st.sidebar.warning(f"⚠️ '{filter_option}' 기간에 조회된 데이터가 없습니다.")
         # -----------------------------
 
         # --- [프로그램 필터 추가 영역] ---
         st.sidebar.divider() 
-        
-        df['app_name'] = df['app_name'].fillna('Unknown App')
-        app_list = ["전체 프로그램"] + df['app_name'].unique().tolist()
-        
+
         selected_app = st.sidebar.selectbox(
             "💻 프로그램 선택",
-            app_list
+            options=app_list,
+            index=0
         )
 
         # 🚨 프로그램 콤보박스 바로 아래에 조회 버튼 배치
@@ -103,7 +115,7 @@ try:
         # -----------------------------
 
         # '전체 프로그램'이 아닌 특정 앱을 선택했을 때만 데이터를 필터링합니다.
-        if selected_app != "전체 프로그램":
+        if not df.empty and selected_app != "전체 프로그램":
             df = df[df['app_name'] == selected_app]
             
         if df.empty:
