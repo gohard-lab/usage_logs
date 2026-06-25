@@ -1,0 +1,3 @@
+main_app
+supabase_analytics
+tracker_web

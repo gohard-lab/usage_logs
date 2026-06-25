@@ -6,7 +6,6 @@ st.set_page_config(page_title="사용자 분석 대시보드", layout="wide")
 
 import pandas as pd
 import plotly.express as px
-from tracker_web import get_supabase_client
 from supabase import create_client
 
 # 1. secrets.toml에서 정보를 안전하게 불러옵니다.
@@ -42,6 +41,9 @@ try:
     if df.empty:
         st.info("아직 데이터가 없습니다. 앱을 실행해 로그를 먼저 쌓아주세요!")
     else:
+        # 💡 [PATCH] Preserve absolute raw dataframe for overall ranking calculation
+        raw_df = df.copy()
+
         # --- [날짜 필터 추가 영역] ---
         st.sidebar.header("🗓️ 기간 필터")
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
@@ -88,56 +90,131 @@ try:
             index=0
         )
 
-        # 🚨 프로그램 콤보박스 바로 아래에 조회 버튼 배치
-        st.sidebar.write("") # 약간의 시각적 여백 추가
-        if st.sidebar.button("🔄 조건에 맞게 최신 데이터 조회", use_container_width=True):
-            # 1. DB에서 가장 최신 데이터를 가져오기 위해 캐시 삭제
-            load_data.clear()
-            # 2. 화면 전체 새로고침 (선택된 조건 유지된 상태로 새 데이터 반영)
-            st.rerun()
+        # 💡 [UI REFACTOR] Removed the manual submit button. 
+        # Streamlit naturally triggers a reactive re-run whenever any sidebar widget state changes.
         st.sidebar.divider()
 
-        # Add a filter toggle to separate real user traffic from infrastructure/bot traffic
+        # ==========================================================
+        # 📊 [LOCAL FILTER REFACTOR] Switch view targets instantly
+        # ==========================================================
         view_mode = st.sidebar.radio(
-            "📊 데이터 조회 모드", 
-            ["전체 데이터 보기", "실제 시청자만 보기 (미국/자동화 제외)"]
+            "📊 모니터링 목적 선택", 
+            [
+                "👥 순수 시청자 통계 보기", 
+                "🛠️ 나의 로컬 테스트 이력 보기",
+                "⚙️ 시스템 유령 핑 및 인프라 봇 보기",
+                "🤖 자동화 로봇 점검 (뉴스 포스터 / 유튜브 동기화)"
+            ]
         )
 
-        if view_mode == "실제 시청자만 보기 (미국/자동화 제외)":
-            # Exclude known bot agents and US server traffic
-            is_bot = df['user_agent'].str.contains('github|cron|bot|uptime', case=False, na=False)
-            is_us = df['country'] == 'United States'
-            df = df[~(is_bot | is_us)]
+        # Define common bot/ghost condition flags
+        is_automation = df['app_name'].isin(['news_auto_poster', 'youtube_hub_sync'])
+        is_bot = df['user_agent'].str.contains('github|cron|bot|uptime|polymath-engine-ping|polymath', case=False, na=False)
+        is_ghost = (df['user_agent'] == 'Unknown') | (df['ip_address'] == 'Pending') | (df['ip_address'] == 'TypeError: Failed to fetch')
+        is_us = df['country'] == 'United States'
+        
+        # 🚨 [CRITICAL BEHAVIORAL PATCH] Catch disguised infrastructure bots based on export analysis
+        # 1. Filter out users who only trigger 'dashboardTab_opened' with an 'Unknown' IP address
+        # 2. Filter out the static legacy browser signature ('Chrome/124.0.0.0') used by the system checker
+        is_disguised_bot = (
+            ((df['ip_address'] == 'Unknown') & (df['action'] == 'dashboardTab_opened')) | 
+            df['user_agent'].str.contains('Chrome/124.0.0.0', na=False)
+        )
+
+        # 🕵️‍♂️ [CAPTURE CEO's TESTS] Isolate CEO's local subnet, Namyangju public IPs, and city
+        is_my_local_ip = df['ip_address'].str.startswith(('192.168.', '127.0.0.1'), na=False)
+        is_my_public_ip = df['ip_address'].isin(['125.142.130.52', '125.142.130.77'])
+        is_namyangju = df['city'] == 'Namyangju'
+
+        is_my_test = (is_my_local_ip | is_my_public_ip | is_namyangju)
+
+        if view_mode == "👥 순수 시청자 통해 보기":
+            # Cleanly exclude all backend bots, ghosts, US traffic, and newly identified disguised system bots
+            df = df[~(is_automation | is_bot | is_ghost | is_us | is_disguised_bot)]
+            
+        elif view_mode == "🛠️ 나의 로컬 테스트 이력 보기":
+            df = df[is_my_test]
+
+        elif view_mode == "⚙️ 시스템 유령 핑 및 인프라 봇 보기":
+            # Include newly identified disguised bots into the infrastructure view target
+            df = df[(is_bot | is_ghost | is_us | is_disguised_bot) & ~is_automation]
+
+        elif view_mode == "🤖 자동화 로봇 점검 (뉴스 포스터 / 유튜브 동기화)":
+            df = df[is_automation]
+            
             
         if df.empty:
             st.warning("선택하신 필터 조건에 해당하는 데이터가 없습니다.")
             st.stop()
-        # -----------------------------
+        # ----------------------------------------------------------
 
         # '전체 프로그램'이 아닌 특정 앱을 선택했을 때만 데이터를 필터링합니다.
+        # 1. 💻 [APP FILTER] Filter main dataframe by selected app first
         if not df.empty and selected_app != "전체 프로그램":
             df = df[df['app_name'] == selected_app]
-            
+
+        # 2. 🛡️ [VIEW MODE FILTER] Apply bot, ghost, US, disguised bot, and CEO test filters to MAIN df
+        is_automation = df['app_name'].isin(['news_auto_poster', 'youtube_hub_sync'])
+        is_bot = df['user_agent'].str.contains('github|cron|bot|uptime|polymath-engine-ping|polymath|prerender', case=False, na=False)
+        is_ghost = (df['user_agent'] == 'Unknown') | (df['ip_address'] == 'TypeError: Failed to fetch')        is_us = df['country'] == 'United States'
+        is_disguised_bot = (
+            ((df['ip_address'] == 'Unknown') & (df['action'] == 'dashboardTab_opened')) | 
+            df['user_agent'].str.contains('Chrome/124.0.0.0', na=False)
+        )
+
+        # CEO's digital footprint flags for main dataframe
+        is_my_local_ip = df['ip_address'].str.startswith(('192.168.', '127.0.0.1'), na=False)
+        is_my_public_ip = df['ip_address'].isin(['125.142.130.52', '125.142.130.77'])
+        is_namyangju = df['city'] == 'Namyangju'
+        is_my_test = (is_my_local_ip | is_my_public_ip | is_namyangju)
+
+        # 💡 [PERFECT SYNC] Exclude is_my_test from pure viewers view target
+        if view_mode == "👥 순수 시청자 통계 보기":
+            df = df[~(is_automation | is_bot | is_ghost | is_us | is_disguised_bot | is_my_test)]
+        elif view_mode == "🛠️ 나의 로컬 테스트 이력 보기":
+            df = df[is_my_test]
+        elif view_mode == "🤖 자동화 로봇 점검 (뉴스 포스터 / 유튜브 동기화)":
+            df = df[is_automation]
+        elif view_mode == "⚙️ 시스템 유령 핑 및 인프라 봇 보기":
+            df = df[(is_bot | is_ghost | is_us | is_disguised_bot) & ~is_automation]
+
         if df.empty:
-            st.warning(f"선택하신 '{selected_app}'의 데이터가 없습니다.")
+            st.warning("선택하신 필터 조건에 해당하는 데이터가 없습니다.")
             st.stop()
-        # -----------------------------
 
-        
-        # --- [기존 상단 지표 출력 부분 교체] ---
-        # Fetch the exact total count directly from the database to bypass the 1000 limit
-        try:
-            count_res = supabase.table('usage_logs').select('*', count='exact').limit(1).execute()
-            total_events_count = count_res.count if count_res.count else len(df)
-        except Exception as e:
-            total_events_count = len(df)
+        # 3. 🏆 [LEADERBOARD BASE] Calculate absolute totals for ranking chart (using raw_df)
+        if 'app_name' in raw_df.columns and not raw_df.empty:
+            raw_automation = raw_df['app_name'].isin(['news_auto_poster', 'youtube_hub_sync'])
+            raw_bot = raw_df['user_agent'].str.contains('github|cron|bot|uptime|polymath-engine-ping|polymath|prerender', case=False, na=False)
+            raw_ghost = (raw_df['user_agent'] == 'Unknown') | (raw_df['ip_address'] == 'TypeError: Failed to fetch')
+            raw_us = raw_df['country'] == 'United States'
+            raw_disguised_bot = (
+                ((raw_df['ip_address'] == 'Unknown') & (raw_df['action'] == 'dashboardTab_opened')) | 
+                raw_df['user_agent'].str.contains('Chrome/124.0.0.0', na=False)
+            )
 
-        # 상단 지표
-        # Metrics display
+            raw_my_local_ip = raw_df['ip_address'].str.startswith(('192.168.', '127.0.0.1'), na=False)
+            raw_my_public_ip = raw_df['ip_address'].isin(['125.142.130.52', '125.142.130.77'])
+            raw_namyangju = raw_df['city'] == 'Namyangju'
+            raw_my_test = (raw_my_local_ip | raw_my_public_ip | raw_namyangju)
+
+            if view_mode == "👥 순수 시청자 통계 보기":
+                rank_base = raw_df[~(raw_automation | raw_bot | raw_ghost | raw_us | raw_disguised_bot | raw_my_test)]
+            elif view_mode == "🛠️ 나의 로컬 테스트 이력 보기":
+                rank_base = raw_df[raw_my_test]
+            elif view_mode == "🤖 자동화 로봇 점검 (뉴스 포스터 / 유튜브 동기화)":
+                rank_base = raw_df[raw_automation]
+            elif view_mode == "⚙️ 시스템 유령 핑 및 인프라 봇 보기":
+                rank_base = raw_df[(raw_bot | raw_ghost | raw_us | raw_disguised_bot) & ~raw_automation]
+        else:
+            rank_base = raw_df
+
+        # --- [상단 지표 출력 부분] ---
         c1, c2, c3 = st.columns(3)
         
-        # If filtered mode is active, show the filtered count. Otherwise, show the true DB total.
-        display_count = len(df) if view_mode == "실제 시청자만 보기 (미국/자동화 제외)" else total_events_count
+        # 💡 [PERFECT SYNC FIX] Now df is fully filtered by both App and View Mode. 
+        # len(df) will accurately display 91 instead of 1647.
+        display_count = len(df)
         
         c1.metric("총 이벤트", f"{display_count}건")
         c2.metric("방문 도시 수", f"{df['city'].nunique()}곳")
@@ -145,7 +222,40 @@ try:
         # Prevent error if dataframe is empty after filtering
         last_city = df.iloc[-1]['city'] if not df.empty else "N/A"
         c3.metric("최근 활동", last_city)
-        # -----------------------------
+        # ----------------------------------------------------------
+
+        # ==========================================================
+        # 🏆 [NEW FEATURE] Program Usage Ranking Visualization
+        # ==========================================================
+        if 'app_name' in rank_base.columns and not rank_base.empty:
+            st.write("") 
+            st.subheader("🏆 프로그램 사용량 순위 (전체 기간 기준)")
+            
+            # Aggregate using the rank_base dataframe (remains as a global leaderboard)
+            rank_df = rank_base['app_name'].value_counts().reset_index()
+            rank_df.columns = ['Program', 'Usage Count']
+            
+            # Generate a clean, modern horizontal bar chart for ranking
+            fig_rank = px.bar(
+                rank_df,
+                x='Usage Count',
+                y='Program',
+                orientation='h',
+                color='Usage Count',
+                color_continuous_scale=['#4292C6', '#2171B5', '#084594'],
+                text='Usage Count'
+            )
+            
+            fig_rank.update_layout(
+                yaxis={'categoryorder': 'total ascending'},
+                margin={"r": 10, "t": 10, "l": 10, "b": 10},
+                height=max(200, len(rank_df) * 40),
+                coloraxis_showscale=False
+            )
+            fig_rank.update_traces(textposition='outside')
+            
+            st.plotly_chart(fig_rank, use_container_width=True)
+        # ==========================================================
 
         # 메인 시각화 섹션
         col1, col2 = st.columns([1, 1])
@@ -159,45 +269,116 @@ try:
             st.plotly_chart(fig_pie, use_container_width=True)
 
         with col2:
-            st.subheader("🔥 접속 지역 히트맵 (Heatmap)")
-            map_data = df[df['lat'] != 0].copy()
+            st.subheader("🔥 접속 지역 사용량 (Bubble Map)")
+            
+            # 1. 좌표가 0인 과거 데이터는 제외 (새로 쌓인 데이터만 추려냄)
+            map_data = df[(df['lat'] != 0) & (df['lon'] != 0)].copy()
             
             if not map_data.empty:
-                fig_map = px.density_mapbox(
-                    map_data, 
-                    lat='lat', 
-                    lon='lon', 
-                    z='id', 
-                    radius=30,
-                    center=dict(lat=36.5, lon=127.5),
-                    zoom=6.5,
-                    mapbox_style="open-street-map",
-                    height=800
-                )
+                map_data['lat'] = pd.to_numeric(map_data['lat'], errors='coerce')
+                map_data['lon'] = pd.to_numeric(map_data['lon'], errors='coerce')
+                map_data = map_data.dropna(subset=['lat', 'lon'])
                 
-                fig_map.update_layout(
-                    margin={"r":0, "t":30, "l":0, "b":0},
-                    mapbox=dict(
-                        center=dict(lat=36.5, lon=127.5),
-                        zoom=6.5
+                if not map_data.empty:
+                    grouped_map = map_data.groupby(['country', 'region', 'city', 'lat', 'lon']).size().reset_index(name='count')
+                    grouped_map['count'] = grouped_map['count'].astype(int)
+                    
+                    # 2. 렌더링
+                    fig_map = px.scatter_mapbox(
+                        grouped_map, 
+                        lat='lat', 
+                        lon='lon', 
+                        color='count',       
+                        # 🚨 [핵심 패치] 흐릿한 흰색/하늘색을 제거하고, 
+                        # 최소값이 '기본 파란색', 최대값이 '아주 짙은 네이비'가 되도록 색상표를 강제 고정합니다.
+                        color_continuous_scale=['#4292C6', '#2171B5', '#084594'],
+                        zoom=6.5,
+                        mapbox_style="open-street-map",
+                        height=800,
+                        hover_name='city',    
+                        hover_data={
+                            'lat': False,     
+                            'lon': False,     
+                            'country': True,  
+                            'region': True,   
+                            'count': True     
+                        }
                     )
-                )
+                    
+                    fig_map.update_traces(marker=dict(size=15))
+                    
+                    # 🚨 [핵심 패치] 데이터가 1건이든 100건이든, 지도 위 모든 점의 크기를 '15'로 큼직하게 고정합니다.
+                    fig_map.update_traces(marker=dict(size=15))
+                    
+                    fig_map.update_layout(
+                        margin={"r":0, "t":30, "l":0, "b":0},
+                        mapbox=dict(
+                            center=dict(lat=36.5, lon=127.5),
+                            zoom=6.5
+                        )
+                    )
 
-                st.plotly_chart(
-                    fig_map, 
-                    use_container_width=True,
-                    config={'scrollZoom': True} 
-                )
+                    st.plotly_chart(
+                        fig_map, 
+                        use_container_width=True,
+                        config={'scrollZoom': True} 
+                    )
+                else:
+                    st.warning("유효한 좌표(숫자형 위도/경도) 데이터가 없습니다.")
             else:
-                st.warning("좌표(lat, lon) 데이터가 포함된 새 로그가 필요합니다.")
+                st.warning("현재 지도에 표시할 위치 데이터가 없습니다. 앱을 실행하여 새로운 접속 로그를 발생시켜 주세요!")
 
         # ---------------------------------------------------------
         # 🚨 [최종 완성] 엑셀처럼 표 직접 수정 + 체크박스 일괄 삭제
         # ---------------------------------------------------------
+        # 1. Inject custom CSS to force horizontal scrollbar to be always visible
+        st.markdown(
+            """
+            <style>
+            /* Ensure the data editor container allows horizontal overflow */
+            div[data-testid="stDataEditor"] div {
+                overflow-x: auto !important;
+            }
+            /* Style and force the webkit scrollbar to remain constantly visible */
+            div[data-testid="stDataEditor"] ::-webkit-scrollbar {
+                height: 10px !important;
+                display: block !important;
+            }
+            div[data-testid="stDataEditor"] ::-webkit-scrollbar-thumb {
+                background-color: #bcbcbc !important;
+                border-radius: 5px !important;
+            }
+            div[data-testid="stDataEditor"] ::-webkit-scrollbar-track {
+                background-color: #f1f1f1 !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+
         st.divider() 
         with st.expander("전체 로그 데이터 보기 및 관리", expanded=True):
+            
             # 1. 최신순 정렬 및 데이터 준비
             display_df = df.sort_values(by='timestamp', ascending=False).copy()
+            
+            # 🚨 [핵심 수정] 하단 그리드에 뿌릴 컬럼만 필터링 (session_id 제외 ➔ app_name 그 자리에 배치)
+            display_columns = [
+                "id", 
+                "app_name", 
+                "action", 
+                "country", 
+                "region", 
+                "city", 
+                "timestamp", 
+                "details", 
+                "lat", 
+                "lon", 
+                "user_agent", 
+                "ip_address", 
+                "content_id"
+            ]
+            display_df = display_df[display_columns]
             
             # 2. 상단 컨트롤 레이아웃 (전체 선택 체크박스)
             col_ctrl1, col_ctrl2 = st.columns([1, 4])
@@ -209,12 +390,12 @@ try:
             # 3. 데이터프레임에 '선택' 열 추가
             display_df.insert(0, "선택", select_all)
             
-            # 4. st.data_editor 실행 (id, session_id 제외 모두 잠금 해제!)
+            # 4. st.data_editor 실행
             edited_df = st.data_editor(
                 display_df,
                 hide_index=True,
-                use_container_width=True,
-                disabled=["id", "session_id"], # 👈 요구사항 완벽 반영! 두 컬럼 빼고 전부 수정 가능
+                use_container_width=False,
+                disabled=["id", "app_name"], # 👈 [수정] session_id가 빠졌으니 app_name을 수정 불가(잠금) 처리합니다.
                 key="log_editor"
             )
             
