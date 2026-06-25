@@ -156,7 +156,8 @@ try:
         # 2. 🛡️ [VIEW MODE FILTER] Apply bot, ghost, US, disguised bot, and CEO test filters to MAIN df
         is_automation = df['app_name'].isin(['news_auto_poster', 'youtube_hub_sync'])
         is_bot = df['user_agent'].str.contains('github|cron|bot|uptime|polymath-engine-ping|polymath|prerender', case=False, na=False)
-        is_ghost = (df['user_agent'] == 'Unknown') | (df['ip_address'] == 'TypeError: Failed to fetch')        is_us = df['country'] == 'United States'
+        is_ghost = (df['user_agent'] == 'Unknown') | (df['ip_address'] == 'TypeError: Failed to fetch')        
+        is_us = df['country'] == 'United States'
         is_disguised_bot = (
             ((df['ip_address'] == 'Unknown') & (df['action'] == 'dashboardTab_opened')) | 
             df['user_agent'].str.contains('Chrome/124.0.0.0', na=False)
